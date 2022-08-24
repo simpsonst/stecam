@@ -1,0 +1,351 @@
+#!/bin/bash
+# -*- c-basic-offset: 4; indent-tabs-mode: nil -*-
+
+## Copyright 2018-19, Lancaster University
+## All rights reserved.
+## 
+## Redistribution and use in source and binary forms, with or without
+## modification, are permitted provided that the following conditions are
+## met:
+## 
+##  * Redistributions of source code must retain the above copyright
+##    notice, this list of conditions and the following disclaimer.
+## 
+##  * Redistributions in binary form must reproduce the above copyright
+##    notice, this list of conditions and the following disclaimer in the
+##    documentation and/or other materials provided with the
+##    distribution.
+## 
+##  * Neither the name of the copyright holder nor the names of
+##    its contributors may be used to endorse or promote products derived
+##    from this software without specific prior written permission.
+## 
+## THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+## "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+## LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
+## A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
+## OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+## SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
+## LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+## DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+## THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+## (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+## OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+##
+##
+## Author: Steven Simpson <https://github.com/simpsonst>
+
+piclim=1000
+filetempl="snap%03d.jpeg"
+
+while [ $# -gt 0 ] ; do
+    arg="$1"
+    shift
+
+    case "$arg" in
+        (-t)
+            filetempl="$1"
+            shift
+            ;;
+        (-n)
+            piclim="$1"
+            shift
+            ;;
+        (*)
+            printf >&2 '%s: unknown argument: %s\n' "$0" "$arg"
+            exit 1
+            ;;
+    esac
+done
+
+readonly lf="$(printf '\n')"
+function readcrlf () {
+    declare -n line_="$1"
+    line_=''
+    local bump_
+    while read -r bump_ ; do
+        if [[ "$bump_" =~ $ ]] ; then
+            line_+="${bump_:0:-1}"
+            return 0
+        fi
+        line_+="$bump_$lf"
+    done
+    line_+="$bump"
+    return 1
+}
+
+function parse_ws () {
+    declare -n text_="$1"
+    readonly BASH_REMATCH
+    
+    if [[ "$text_" =~ ^[\ \   ]+(.*)$ ]] ; then
+        text_="${BASH_REMATCH[1]}"
+        return 0
+    fi
+    return 1
+}
+
+function parse_ws0 () {
+    declare -n text_="$1"
+    readonly BASH_REMATCH
+    
+    if [[ "$text_" =~ ^[\ \   ]*(.*)$ ]] ; then
+        text_="${BASH_REMATCH[1]}"
+        return 0
+    fi
+    return 1
+}
+
+## Separators: ()<>@,;:\"/[]?={}
+function parse_token () {
+    declare -n toktext_="$1"
+    declare -n tokout_="$2"
+    readonly BASH_REMATCH
+
+    if [[ "$toktext_" =~ ^([-!#$%&\'*+.0-9A-Z^_\`a-z|~]+)(.*)$ ]] ; then
+        tokout_="${BASH_REMATCH[1]}"
+        toktext_="${BASH_REMATCH[2]}"
+        return 0
+    fi
+    return 1
+}
+
+function parse_ws0token () {
+    declare -n ws0toktext_="$1"
+    declare -n ws0tokout_="$2"
+    local ws0ttmp_="$ws0toktext_"
+
+    if parse_ws0 ws0ttmp_ &&
+            parse_token ws0ttmp_ ws0tokout_ ; then
+        ws0toktext_="$ws0ttmp_"
+        return 0
+    fi
+    return 1
+}
+
+function parse_qs () {
+    declare -n qstext_="$1"
+    declare -n qsout_="$2"
+    readonly BASH_REMATCH
+
+    if [[ "$qstext_" =~ ^\"(([^\\\"]|(\\.))*)\"(.*)$ ]] ; then
+        qsout_="$(printf '%s' "${BASH_REMATCH[1]}" | sed -e 's/\\\(.\)/\1/g')"
+        qstext_="${BASH_REMATCH[2]}"
+        return 0
+    fi
+    return 1
+}
+
+function parse_ws0qs () {
+    declare -n ws0qstext_="$1"
+    declare -n ws0qsout_="$2"
+    local ws0qstmp_="$ws0qstext_"
+
+    if parse_ws0 ws0qstmp_ &&
+            parse_qs ws0qstmp_ ws0qsout_ ; then
+        ws0qstext_="$ws0qstmp_"
+        return 0
+    fi
+    return 1
+}
+
+function parse_toqs () {
+    declare -n text_="$1"
+    declare -n out_="$2"
+    parse_qs text_ out_ || parse_token text_ out_
+}
+
+function parse_ws0toqs () {
+    declare -n text_="$1"
+    declare -n out_="$2"
+    parse_ws0qs text_ out_ || parse_ws0token text_ out_
+}
+
+function parse_symb () {
+    declare -n symtext_="$1"
+    local symb_="$2"
+    if [ "${symtext_:0:1}" = "$symb_" ] ; then
+        symtext_="${symtext_:1}"
+        return 0
+    fi
+    return 1
+}
+
+function parse_ws0symb () {
+    declare -n text_="$1"
+    local ws0symb_="$2"
+    local ws0stmp_="$text_"
+
+    if parse_ws0 ws0stmp_ &&
+            parse_symb ws0stmp_ "$ws0symb_" ; then
+        text_="$ws0stmp_"
+        return 0
+    fi
+    return 1
+}
+
+function parse_mimetype () {
+    declare -n text_="$1"
+    declare -n major_="$2"
+    declare -n minor_="$3"
+    local pmttmp_="$text_"
+    if parse_token pmttmp_ major_ &&
+            parse_symb pmttmp_ '/' &&
+            parse_token pmttmp_ minor_ ; then
+        text_="$pmttmp_"
+        return 0
+    fi
+    return 1
+}
+
+function parse_ws0mimetype () {
+    declare -n text_="$1"
+    declare -n major_="$2"
+    declare -n minor_="$3"
+    local pmttmp_="$text_"
+    if parse_ws0 pmttmp_ &&
+            parse_token pmttmp_ major_ &&
+            parse_symb pmttmp_ '/' &&
+            parse_token pmttmp_ minor_ ; then
+        text_="$pmttmp_"
+        return 0
+    fi
+    return 1
+}
+
+function parse_param () {
+    declare -n ptext_="$1"
+    declare -n pkey_="$2"
+    declare -n pvalue_="$3"
+    local partmp_="$ptext_"
+    if parse_ws0symb partmp_ ';' &&
+            parse_ws0token partmp_ pkey_ &&
+            parse_ws0symb partmp_ '=' &&
+            parse_ws0toqs partmp_ pvalue_ ; then
+        ptext_="$partmp_"
+        return 0
+    fi
+    return 1
+}
+
+function parse_params () {
+    declare -n parstext_="$1"
+    declare -n map_="$2"
+    local parskey_ parsvalue_
+    local parsgot_=1
+    while parse_param parstext_ parskey_ parsvalue_ ; do
+        map_["$parskey_"]="$parsvalue_"
+        parsgot_=0
+    done
+    return "$parsgot_"
+}
+
+function parse_ws0end () {
+    declare -n text_="$1"
+    if [[ "$text_" =~ ^[\ \   ]*$ ]] ; then
+        text_=''
+        return 0
+    fi
+    return 1
+}
+
+function read_header () {
+    declare -n map_="$1"
+    readonly BASH_REMATCH
+    local rhline_ rhkey_ rhval_
+
+    ## Read a header line, removing the terminating CR.
+    while readcrlf rhline_ ; do
+        #echo "line: [$rhline_]"
+
+        if [ -z "$rhline_" ] ; then
+            ## The header terminator was reached.
+            break
+        fi
+        if [[ "$rhline_" =~ ^[\ \     ] ]] ; then
+            rhval_="${rhval_}${rhline_:1}"
+            #printf '  Continuation\n'
+            unset rhline_
+            continue
+        fi
+
+        if [ "$rhkey_" ] ; then
+            HEADER["${rhkey_^^}"]="$rhval_"
+            #printf '  %s=%s\n' "$rhkey_" "$rhval_"
+            unset rhkey_ rhval_
+        fi
+
+        if [[ "$rhline_" =~ ^([^:]+)[\ \      ]*:[\ \       ]*(.*)$ ]] ; then
+            rhkey_="${BASH_REMATCH[1]}"
+            rhval_="${BASH_REMATCH[2]}"
+            #printf '  Start: %s=%s\n' "$rhkey_" "$rhval_"
+        else
+            #printf 'Malformed\n'
+            true
+        fi
+        unset rhline_
+    done
+
+    ## Process the last header.
+    if [ "$rhkey_" ] ; then
+        HEADER["${rhkey_^^}"]="$rhval_"
+    fi
+}
+
+
+read vers code msg
+if [ "$code" != 200 ] ; then
+    printf >&2 'Bad HTTP status: %s\n' "$code"
+    exit 1
+fi
+
+declare -A HEADER
+read_header HEADER
+
+#declare -p HEADER
+
+ct="${HEADER["CONTENT-TYPE"]}"
+declare -A ctpars=()
+if ! parse_ws0mimetype ct major minor ||
+        ! parse_params ct ctpars ||
+        [ "$major" != multipart ] ||
+        [ "$minor" != x-mixed-replace ] ||
+        [ -z "${ctpars[boundary]}" ] ; then
+    printf >&2 'Not a multipart/x-mixed-replace with a defined boundary\n'
+    printf >&2 '  Type: %s\n' "${HEADER["CONTENT-TYPE"]}"
+    printf >&2 '  Unparsed: %s\n' "$ct"
+    exit 1
+fi
+boundary="${ctpars[boundary]}"
+
+## Skip the preamble.
+while readcrlf line && [ "$line" != "--$boundary" ] ; do
+    true
+    #echo "skipped $line"
+done
+
+#echo "found $boundary"
+picno=0
+while [ "$line" = "--$boundary" ] ; do
+    HEADER=()
+    read_header HEADER
+    #declare -p HEADER
+
+    ## Check for an image.
+    length="${HEADER["CONTENT-LENGTH"]}"
+    if [ "${HEADER["CONTENT-TYPE"]}" != image/jpeg ] ; then
+        head -c "$length" > /dev/null
+    else
+        ## Choose the filename, and write to it.
+        filename="$(printf "$filetempl" "$((picno % piclim))")"
+        picno=$(( picno + 1 ))
+        head -c "$length" > ".tmp-$filename"
+        if [[ "${HEADER[X-TIMESTAMP]}" =~ ^[0-9]+\.[0-9]+$ ]] ; then
+            touch -d @"${HEADER[X-TIMESTAMP]}" ".tmp-$filename"
+        fi
+        mv ".tmp-$filename" "$filename"
+        #printf 'Written to %s\n' "$filename"
+    fi
+    readcrlf line
+    readcrlf line
+done

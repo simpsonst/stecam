@@ -1,0 +1,641 @@
+#!/bin/bash
+# -*- c-basic-offset: 4; indent-tabs-mode: nil -*-
+
+## Copyright 2018-19, Lancaster University
+## All rights reserved.
+## 
+## Redistribution and use in source and binary forms, with or without
+## modification, are permitted provided that the following conditions are
+## met:
+## 
+##  * Redistributions of source code must retain the above copyright
+##    notice, this list of conditions and the following disclaimer.
+## 
+##  * Redistributions in binary form must reproduce the above copyright
+##    notice, this list of conditions and the following disclaimer in the
+##    documentation and/or other materials provided with the
+##    distribution.
+## 
+##  * Neither the name of the copyright holder nor the names of
+##    its contributors may be used to endorse or promote products derived
+##    from this software without specific prior written permission.
+## 
+## THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+## "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+## LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
+## A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
+## OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+## SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
+## LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+## DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+## THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+## (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+## OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+##
+##
+## Author: Steven Simpson <https://github.com/simpsonst>
+
+HERE="$(readlink -f "$0")"
+HERE="${HERE%/sbin/*}"
+
+source "$HERE/share/stecam/defaults.sh"
+debug=1
+unset record
+
+while [ $# -gt 0 ] ; do
+    arg="$1"
+    shift
+
+    case "$arg" in
+        (-h|--help)
+            echo >&2 <<EOF
+Usage: $0 [options]
+        -P dir  destination for captured images (CAPDIR=/var/run/stecam/capture)
+        -M dir  destination for movies (MOVDIR=/var/spool/stecam)
+        -d dev  video device (DEVICE=/dev/video0)
+        -r int  capture frame rate (RATE=10)
+        -S num  sample frame rate (DETRATE=$$RATE)
+        -n int  frames averaged after (GATHER=5)
+        -H int  frames averaged before (MERGE=5)
+        -s WxH  capture size (CAPDIMS=640x480)
+        -a WxH  detection size (DETDIMS=16x12)
+        -t int  motion threshold (THRESHOLD=200)
+        -l int  linger recording (LINGER=10 frames)
+        -z int  recording hesitation (HESITATE=4 frames)
+        -p pfx  prefix for dated movies (PREFIX=motion)
+        -F sfx  suffix for dated movies (SUFFIX)
+        -R int  rotation in degrees; 0/90/180/270 (ROTATION=0)
+        -f file Source configuration.
+        -q      Hide score.
+        -x      Enable recording.
+EMAIL_FROM, EMAIL_TO and PUBPREFIX must be set for email
+notifications.
+EOF
+            exit
+            ;;
+
+        (-q)
+            unset debug
+            ;;
+
+        (-x)
+            record=1
+            ;;
+
+        (-R)
+            ROTATION="$1"
+            shift
+            ;;
+
+        (-P)
+            CAPDIR="$(readlink -f "$1")"
+            shift
+            ;;
+
+        (-p)
+            PREFIX="$1"
+            shift
+            ;;
+
+        (-F)
+            SUFFIX="$1"
+            shift
+            ;;
+
+        (-n)
+            GATHER="$1"
+            shift
+            ;;
+
+        (-H)
+            MERGE="$1"
+            shift
+            ;;
+
+        (-M)
+            MOVDIR="$(readlink -f "$1")"
+            shift
+            ;;
+
+        (-d)
+            DEVICE="$(readlink -f "$1")"
+            shift
+            ;;
+
+        (-r)
+            RATE="$1"
+            shift
+            ;;
+
+        (-S)
+            DETRATE="$1"
+            shift
+            ;;
+
+        (-f)
+            source "$1"
+            shift
+            ;;
+
+        (-s)
+            CAPDIMS="$1"
+            shift
+            ;;
+
+        (-a)
+            DETDIMS="$1"
+            shift
+            ;;
+
+        (-l)
+            LINGER="$1"
+            shift
+            ;;
+
+        (-z)
+            HESITATE="$1"
+            shift
+            ;;
+
+        (-t)
+            THRESHOLD="$1"
+            shift
+            ;;
+
+        (-*|+*)
+            printf >&2 '%s: unknown switch %s\n' "$0" "$arg"
+            exit 1
+            ;;
+
+        (*)
+            printf >&2 '%s: unknown argument %s\n' "$0" "$arg"
+            exit 1
+            ;;
+    esac
+done
+
+## Split the sample rate into a rational number.
+if [ -z "$DETRATE" ] ; then
+    DETRATE_NUM="$RATE"
+    DETRATE_DENOM=1
+else
+    DETRATE_NUM="${DETRATE%/*}"
+    DETRATE_DENOM="${DETRATE#"$DETRATE_NUM"}"
+    DETRATE_DENOM="${DETRATE_DENOM#/}"
+    DETRATE_DENOM="${DETRATE_DENOM:-1}"
+fi
+
+DETRATE_DENOM=$((DETRATE_DENOM * 1000))
+## Eliminate common factors.
+a=$((DETRATE_NUM))
+b=$((DETRATE_DENOM))
+while
+    if (( b > a )) ; then
+        c=$((b))
+        b=$((a))
+        a=$((c))
+    fi
+    rat=$((a % b))
+    [ "$rat" -ne 0 ] ; do
+    a=$((b))
+    b=$((rat))
+done
+DETRATE_NUM=$((DETRATE_NUM / b))
+DETRATE_DENOM=$((DETRATE_DENOM / b))
+ 
+## Work out the period between contributing frames to motion
+## detection, in milliseconds.
+sample_period_ms=$(( DETRATE_DENOM * 1000 / DETRATE_NUM ))
+sample_period_rem=$(( DETRATE_DENOM * 1000 % DETRATE_NUM ))
+sample_period_denom=$((DETRATE))
+
+LOW_THRESHOLD="${THRESHOLD%-*}"
+HIGH_THRESHOLD="${THRESHOLD#*-}"
+
+if (( HIGH_THRESHOLD < LOW_THRESHOLD )) ; then
+    THRESHOLD="$LOW_THRESHOLD"
+    LOW_THRESHOLD="$HIGH_THRESHOLD"
+    HIGH_THRESHOLD="$THRESHOLD"
+fi
+
+source "$HERE/share/stecam/common.sh"
+
+overlaygeom="$CAPDIMS"
+case "$ROTATION" in
+    (180)
+        JPEGTRAN+=(-rotate 180)
+        ;;
+    (90)
+        JPEGTRAN+=(-rotate 90)
+        overlaygeom="${CAPDIMS#*x}x${CAPDIMS%x*}"
+        ;;
+    (270)
+        JPEGTRAN+=(-rotate 270)
+        overlaygeom="${CAPDIMS#*x}x${CAPDIMS%x*}"
+        ;;
+esac
+
+if [ -r "$OVERLAY" ] ; then
+    CONVERT=( "$OVERLAY" -geometry "$overlaygeom"+0+0 -composite )
+fi
+
+pdigs=$((POWER-4))
+if (( pdigs < 2 )) ; then pdigs=5 ; fi
+
+mkdir -p "${CAPDIR%/}/" "${WORKDIR%/}/" "${DETDIR%/}/" "${MOVDIR%/}/"
+
+if [ "${DEVICE:0:1}" = '/' ] ; then
+    (
+        sleep 2
+        while true ; do
+            ## Keep invoking streamer to grab frames from a local
+            ## camera.  Grab a large number of frames with each cycle,
+            ## as each restart manifests a flash of the image, which
+            ## can raise a false positive.
+            if ! streamer -c "$DEVICE" -q -t 100000 -r "$RATE" \
+                 -s "$CAPDIMS" -f jpeg \
+                 -o "${CAPDIR%/}/snap00000.jpeg" 2> /dev/null ; then
+                ## If streamer failed, wait 10s before trying again to
+                ## avoid spinning in a hopeless situation.
+                sleep 10
+            fi
+        done
+    ) &
+    cappid=$!
+elif PROTO="${DEVICE%%:*}" ; [ "${PROTO,,}" = "rtsp" ] ; then
+    (
+        cd "${CAPDIR%/}/"
+        while true ; do
+            ## Keep invoking curl to fetch a multipart/x-mixed-replace
+            ## stream of JPEGs.
+            if ! ffmpeg -nostdin -v error -y -hide_banner \
+                 -i "$DEVICE" "snap%015d.jpeg" ; then
+                ## If ffmpeg failed, wait 10s before trying again to
+                ## avoid spinning in a hopeless situation.
+                sleep 10
+            fi
+        done
+    ) &
+    cappid=$!
+else
+    (
+        cd "${CAPDIR%/}/"
+        while true ; do
+            ## Keep invoking curl to fetch a multipart/x-mixed-replace
+            ## stream of JPEGs.
+            if ! curl --netrc-optional -s -i "$DEVICE" | \
+                    "$HERE/share/stecam/mpmr" -n 100000 \
+                                              -t "snap%05d.jpeg" ; then
+                ## If curl failed, wait 10s before trying again to
+                ## avoid spinning in a hopeless situation.
+                sleep 10
+            fi
+        done
+    ) &
+    cappid=$!
+fi
+disown $cappid
+
+function clean_up () {
+    kill "$cappid"
+    pkill -g $$ -x inotifywait
+}
+
+trap clean_up EXIT
+
+function translate () {
+    local next_event=0
+    local jpeg submit
+    while read jpeg ; do
+        ## Ignore hidden files.
+        local leaf="${jpeg##*/}"
+        if [ "${leaf:0:1}" = '.' ] ; then continue ; fi
+
+        ## Get the timestamp of this file in milliseconds, then scale
+        ## up to eliminate the frequency numerator (or period
+        ## denominator).
+        local t="$(date '+%s%3N' -r "$jpeg")"
+        local st=$((t * DETRATE_NUM))
+
+        ## Work out where to save the image for recordings.
+        local mid="${DETDIR%/}/at-$t.jpg"
+
+        ## Work out where to drop the image for the live feed.  If
+        ## 'convert' is used, it will first write to $tmplive, then
+        ## that will be moved to $live.  Otherwise, $live is set as a
+        ## hard link to $mid.  The CGI server will then get either a
+        ## MOVED_TO or a CREATE event.
+        local live="${WORKDIR%/}/at-$t.jpg"
+        local tmplive="${DETDIR%/}/tmp-$t.jpg"
+
+        ## Work out where to drop the condensed image for motion
+        ## detection.
+        local dest="${DETDIR%/}/at-$t.pgm"
+
+        ## Re-orient the image if necessary, and move to the working
+        ## directory, with a name reflecting the timestamp.
+        if [ ${#JPEGTRAN[@]} -gt 0 ] ; then
+            jpegtran "${JPEGTRAN[@]}" "$jpeg" > "$mid"
+            touch -r "$jpeg" "$mid"
+            rm "$jpeg"
+        else
+            mv "$jpeg" "$mid"
+        fi
+
+        if [ "$LIVEDIMS" ] ; then
+            ## Scale the image down for the live feed.
+            convert "$mid" -scale "$LIVEDIMS" "$tmplive" &&
+                touch -r "$mid" "$tmplive" &&
+                mv "$tmplive" "$live"
+        else
+            ## The live image is the same as the recorded, so copy it
+            ## into the live directory.
+            ln -f "$mid" "$live"
+        fi
+
+        if [ "$DETDIMS" ] && (( st >= next_event )) ; then
+            ## This frame should be submitted for motion detection.
+
+            ## How many frames should we have had?
+            local offset=$(( 1 + (st - next_event) / DETRATE_DENOM ))
+            next_event=$(( next_event + DETRATE_DENOM * offset ))
+            if (( offset > 1 )) ; then
+                printf >&2 'Missed %d frames\n' $((offset - 1))
+            fi
+
+            ## Condense the information in the image in a way that makes
+            ## motion detection easier.
+            convert -quiet \( "$mid" "${CONVERT[@]}" \) \
+                    -normalize \
+                    -scale "$DETDIMS"'!' \
+                    -set colorspace Gray \
+                    -separate -average -depth 8 \
+                    "${POSTXLATE[@]}" \
+                    "$dest"
+
+            ## Report the condensed image to the motion detector,
+            ## along with the file it was derived from.
+            echo "${#mid}" "$mid" "$dest"
+        else
+            ## Report a source file to be passed through to the
+            ## recorder.
+            echo "${#mid}" "$mid"
+        fi
+    done
+}
+
+## Before we can stop a recording, we have to wait at least as long as
+## our hesitation time plus the number of frames we merge.
+if (( GATHER + HESITATE > LINGER )) ; then
+    BACKSTEP=$(( GATHER + HESITATE - LINGER ))
+    LINGER=$(( GATHER + HESITATE ))
+else
+    BACKSTEP=$(( LINGER ))
+fi
+
+rm -f "${WORKDIR%/}/at-"*".jpg" \
+   "${DETDIR%/}/at-"*".jpg" \
+   "${DETDIR%/}/tmp-"*".jpg" \
+   "${DETDIR%/}/copy-"*".jpg" \
+   "${DETDIR%/}/at-"*".pgm" \
+   "${DETDIR%/}/"*".concat"
+
+unset start
+rem=0
+lastscore=0
+lastmean=0
+laststddev=0
+lastrat=1
+retained=()
+analyzed=()
+declare -A hist=() histmean=() histstddev=() histrat=()
+while read score mean stddev rat file ; do
+    file="${file%X}"
+    file="${file#X}"
+
+    ## Extract the source file's timestamp, and append it to our frame
+    ## list.
+    t="${file#"${DETDIR%/}"/at-}"
+    t="${t%.jpg}"
+    retained+=("$t")
+    # printf >&2 'Retained:'
+    # printf >&2 ' [%s]' "${retained[@]}"
+    # printf >&2 '\n'
+
+    flag=" "
+    if [ "$score" != '-' ] ; then
+        lastscore="$score"
+        lastmean="$mean"
+        laststddev="$stddev"
+        lastrat="$rat"
+        flag="*"
+    fi
+    hist["$t"]="$lastscore"
+    histmean["$t"]="$lastmean"
+    histstddev["$t"]="$laststddev"
+    histrat["$t"]="$lastrat"
+    if [ "$debug" ] ; then
+        printf >&2 '%s: %0*d%s %3d %1s %6.3f %.3g %.3g\n' \
+                   "$(date '+%T.%3N' -d "@${t:0:-3}.${t:0-3}")" \
+                   "$pdigs" "$lastscore" "$flag" \
+                   "$rem" "${start:+R}" \
+                   "$lastrat" "$lastmean" "$laststddev"
+    fi
+
+    ## If no score is provided, the recording state shouldn't change.
+    if [ "$score" = '-' ] ; then continue ; fi
+
+    ## Record the timestamp of this frame which has been analyzed.
+    analyzed+=("$t")
+    # printf >&2 'Analyzed:'
+    # printf >&2 ' [%s]' "${analyzed[@]}"
+    # printf >&2 '\n'
+
+    if [ -n "$start" ] ; then
+        ## We're already recording.  Look for a reason to stop.
+        if (( score > LOW_THRESHOLD )) ; then
+            rem="$LINGER"
+        elif (( rem > 0 )) ; then
+            ## We should still hang on a while.
+            ((rem--))
+        else
+            ## Derive the recording's filename from the time of its
+            ## first frame.  Also choose a hidden, temporary filename
+            ## in the same directory; the FFmpeg will write to that,
+            ## and then it will be moved into the correct location.
+            t0="${retained[0]}"
+            leaf="${PREFIX}-"
+            tstxt="$(date '+'"$DATEFMT" -d "@${t0:0:-3}.${t0:0-3}")"
+            leaf+="$tstxt${SUFFIX}.mp4"
+            out="${MOVDIR%/}/$leaf"
+            tmpout="${MOVDIR%/}/.tmp-$leaf"
+            movdesc="${DETDIR%/}/$leaf.concat"
+
+            ## Convert the end time into H:M:S.MS for logging.
+            t1=$((analyzed[-BACKSTEP]))
+
+            ## Identify and hard-link the frames to record, and their
+            ## durations.
+            sequence=()
+            copy=("${retained[@]}")
+            nxt="${copy[0]}"
+            deletions=()
+            unset thumb
+            while (( nxt < t1 )) ; do
+                copy=("${copy[@]:1}")
+
+                ## Record the timestamp and duration of the frame.
+                ti="$nxt"
+                nxt="${copy[0]}"
+                sequence["$ti"]=$((nxt - ti))
+
+                if [ "$record" -a "$RECORD" ] ; then
+                    orig="${DETDIR%/}/at-$ti.jpg"
+
+                    ## Identify the first frame whose hist[] value
+                    ## exceeds the initial detection threshold.
+                    ## Create a hard link to it alongside the "$dup"
+                    ## files, and indicate that it is to be used as
+                    ## the thumbnail.
+                    if [ -z "$thumb" ] && (( hist["$ti"] >= HIGH_THRESHOLD ))
+                    then
+                        thumb="${DETDIR%/}/thumb-$ti.jpg"
+                        ln "$orig" "$thumb"
+                        deletions+=("$thumb")
+                        eval $(identify -format 'width=%w\nheight=%h\n' "$thumb")
+                        thumbdims="$((width*180/height))x180"
+                    fi
+
+                    ## Embed a timestamp and detection score into a
+                    ## copy of the frame, which we delete after making
+                    ## the video.
+                    dup="${DETDIR%/}/copy-$ti.jpg"
+                    deletions+=("$dup")
+                    msg="$(date "+%Y-%m-%dT%H-%M-%S.%2N%z" -d "@${ti:0:-3}.${ti:0-3}")"
+                    msg+="$(printf ' %0*d%s' "$pdigs" "${hist["$ti"]}")"
+                    msg+="$(printf ' %6.3f %.3g %.3g' \
+                                   "${histrat["$ti"]}" \
+                                   "${histmean["$ti"]}" \
+                                   "${histstddev["$ti"]}")"
+                    convert "$orig" \
+                            -fill black -background white \
+                            -font "$FONT" \
+                            -pointsize "$POINTSIZE" \
+                            -gravity "$GRAVITY" \
+                            label:"$msg" \
+                            -composite "$dup"
+                    #ln "$orig" "$dup"
+                fi
+            done
+            analyzed=("${analyzed[@]:0-LINGER}")
+
+            dur=$((t1 - t0))
+            if [ "$debug" ] ; then
+                printf 'recording %s+%6.3f (%d frames)' \
+                       "$(date '+%T.%3N' -d "@${t0:0:-3}.${t0:0-3}")" \
+                       "${dur:0:-3}.${dur:0-3}" \
+                       "${#sequence[@]}"
+            fi
+            if [ "$record" -a "$RECORD" ] ; then
+                if [ "$debug" ] ; then printf '\n' ; fi
+                (
+                    for ti in "${!sequence[@]}" ; do
+                        dur="${sequence["$ti"]}"
+                        dur="$(printf '%04d' "$dur")"
+                        printf 'file '"'"'%s/copy-%s.jpg'"'"'\n' \
+                               "${DETDIR%/}" "$ti"
+                        printf 'duration %.3f\n' "${dur:0:-3}.${dur:0-3}"
+                    done > "$movdesc"
+                    deletions+=("$movdesc" "$tmpout")
+                    cmd=(ffmpeg -nostdin -v error -f concat -vcodec mjpeg \
+                                -safe 0 \
+                                -protocol_whitelist pipe,file \
+                                -i "$movdesc" \
+                                ${thumb:+-i "$thumb" -map 0 -map 1} \
+                                "${FFMPEG_OUT[@]}" \
+                                ${thumb:+-c:v:1 png \
+                                                -s:v:1 "$thumbdims" \
+                                                -disposition:v:1 attached_pic} \
+                                "$tmpout")
+                    #printf >&2 '%q ' "${cmd[@]}"
+                    #printf >&2 '\n'
+                    "${cmd[@]}"
+                    touch -d "@${t0:0:-3}.${t0:0-3}" "$tmpout"
+                    if [ "$CHOWN" ] ; then
+                        chown "$CHOWN" "$tmpout"
+                    fi
+                    mv "$tmpout" "$out"
+                    rm -f "${deletions[@]}"
+                    if [ "$EMAIL_TO" -a "$EMAIL_FROM" -a "$PUBPREFIX" ] ; then
+                        sendmail -i -r "$EMAIL_FROM" "$EMAIL_TO" <<EOF
+From: $EMAIL_FROM
+To: $EMAIL_TO
+X-Stecam-Capture-Time: $tstxt
+Subject: Motion detection $tstxt
+
+Motion detected:
+
+$PUBPREFIX$leaf
+EOF
+                    fi
+                ) &
+                if [ "$debug" ] ; then printf 'started %s\n' "$out" ; fi
+            else
+                if [ "$debug" ] ; then printf ' (disabled)\n' ; fi
+            fi
+            unset start
+        fi
+    else
+        if (( score > HIGH_THRESHOLD )) ; then
+            ## We're not recording, but the score is high enough.
+            if (( rem >= HESITATE )) ; then
+                ## It's been high enough for long enough.
+                start=yes
+                rem="$LINGER"
+                printf 'recording start\n'
+            else
+                ## We haven't been consistently high yet.
+                ((rem++))
+            fi
+        else
+            ## We're not recording, and the score is too low to start
+            ## recording.  Decay the record of activity.
+            if (( rem > 0 )) ; then
+                ((rem--))
+            fi
+        fi
+
+        if [ -z "$start" ] ; then
+            ## If we're not recording, we only keep the last
+            ## GATHER+HESITATE+LEADER analyzed frames.
+            if (( ${#analyzed[@]} > GATHER + HESITATE + LEADER )) ; then
+                analyzed=("${analyzed[@]:0-GATHER-HESITATE-LEADER}")
+            fi
+        fi
+    fi
+
+    ## If we're not recording, get rid of old files.
+    if [ -z "$start" ] ; then
+        while [ ${#retained[@]} -gt 0 ] &&
+                  t=$(( retained[0] )) ;
+              (( t < analyzed[0] )) ; do
+            unset hist["$t"]
+            unset histmean["$t"]
+            unset histstddev["$t"]
+            unset histrat["$t"]
+            live="${WORKDIR%/}/at-$t.jpg"
+            mid="${DETDIR%/}/at-$t.jpg"
+            dest="${DETDIR%/}/at-$t.pgm"
+            rm -f "$mid" "$dest" "$live"
+            retained=("${retained[@]:1}")
+            if [ "$debug" ] ; then
+                true
+                #printf >&2 'Removed %s\n' "$mid"
+            fi
+        done
+    fi
+done < <(inotifywait -q -m --format '%w%f' \
+                     -e MOVED_TO,CLOSE_WRITE "${CAPDIR%/}/" \
+             | translate \
+             | stdbuf -oL -eL "$HERE/libexec/stecam/modect" -v "$VAREXP" \
+                      -s "$DETDIMS" -n "$GATHER" -p "$POWER" -H "$MERGE")
