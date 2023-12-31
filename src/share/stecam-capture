@@ -269,7 +269,7 @@ elif PROTO="${DEVICE%%:*}" ; [ "${PROTO,,}" = "rtsp" ] ; then
             ## Keep invoking curl to fetch a multipart/x-mixed-replace
             ## stream of JPEGs.
             if ! ffmpeg -nostdin -v error -y -hide_banner \
-                 -i "$DEVICE" "snap%015d.jpeg" ; then
+                 -i "$DEVICE" -qscale:v 2 "snap%015d.jpeg" ; then
                 ## If ffmpeg failed, wait 10s before trying again to
                 ## avoid spinning in a hopeless situation.
                 sleep 10
