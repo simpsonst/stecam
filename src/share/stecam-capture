@@ -174,6 +174,13 @@ EOF
     esac
 done
 
+if [ -n "$RUNTIME_DIRECTORY" ] ; then
+    ## Override some of the default locations if we're a SystemD unit.
+    CAPDIR="${RUNTIME_DIRECTORY%/}/capture"
+    WORKDIR="${RUNTIME_DIRECTORY%/}/work"
+    DETDIR="${RUNTIME_DIRECTORY%/}/detect"
+fi
+
 ## Split the sample rate into a rational number.
 if [ -z "$DETRATE" ] ; then
     DETRATE_NUM="$RATE"

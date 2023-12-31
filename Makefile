@@ -57,6 +57,7 @@ MYABSPATH=$(foreach f,$1,$(if $(patsubst /%,,$f),$(MYCURDIR)$f,$f))
 BINODEPS_SCRIPTDIR=src/share
 LIBEXECDIR=$(PREFIX)/libexec/stecam
 SHAREDIR=$(PREFIX)/share/stecam
+SBINDIR=$(PREFIX)/sbin
 
 datafiles += defaults.sh
 datafiles += common.sh
@@ -75,11 +76,11 @@ stecam-serve-bin_obj += serve
 
 include binodeps.mk
 
-out/stecam.service: src/stecam.service.m4
+out/stecam@.service: src/stecam.service.m4
 	$(MKDIR) "$(@D)"
-	$(M4) -DSHAREDIR="$(SHAREDIR)" "$<" > "$@"
+	$(M4) -DSHAREDIR="$(SHAREDIR)" -DSBINDIR="$(SBINDIR)" "$<" > "$@"
 
-all:: installed-binaries out/stecam.service
+all:: installed-binaries out/stecam@.service
 
 install-apt::
 	apt-get install \
@@ -94,7 +95,7 @@ install-apt::
 
 install-systemd::
 	$(INSTALL) -m 755 -d /etc/stecam.d
-	$(INSTALL) -m 644 out/stecam.service /etc/systemd/system/
+	$(INSTALL) -m 644 out/stecam@.service /etc/systemd/system/
 	systemctl daemon-reload
 
 install:: install-data
