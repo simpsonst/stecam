@@ -6,6 +6,7 @@
 #include <string.h>
 #include <limits.h>
 #include <assert.h>
+#include <stdbool.h>
 
 #include <sys/types.h>
 #include <sys/time.h>
@@ -27,6 +28,22 @@ static ssize_t use_splice(int tofd, int fromfd, size_t rem)
 static ssize_t use_sendfile(int tofd, int fromfd, size_t rem)
 {
   return sendfile(tofd, fromfd, NULL, rem);
+}
+
+static bool check_image_name(const char *s)
+{
+  if (*s++ != 'a') return false;
+  if (*s++ != 't') return false;
+  if (*s++ != '-') return false;
+  const char *const p = s;
+  while (*s >= '0' && *s <= '9')
+    s++;
+  if (s - p == 0) return false;
+  if (*s++ != '.') return false;
+  if (*s++ != 'j') return false;
+  if (*s++ != 'p') return false;
+  if (*s++ != 'g') return false;
+  return true;
 }
 
 int main(int argc, const char *const *argv)
@@ -91,6 +108,7 @@ int main(int argc, const char *const *argv)
          ptr = (struct inotify_event *)
            &(ptr->len + sizeof *ptr)[(char *) ptr]) {
       if (ptr->len == 0) continue;
+      if (!check_image_name(ptr->name)) continue;
       chosen = ptr;
     }
     if (chosen == NULL) continue;
