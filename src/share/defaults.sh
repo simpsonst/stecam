@@ -42,8 +42,8 @@
 ## multipart/x-mixed-replace of image/jpeg to fetch from
 DEVICE=/dev/video0
 
-## Capture rate for Video4Linux devices; ignored for HTTP; must be an
-## integer
+## Capture rate for Video4Linux devices; no longer ignored for
+## HTTP/RTSP; must be an integer
 RATE=10
 
 ## The capture dimensions for Video4Linux devices
