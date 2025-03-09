@@ -149,7 +149,7 @@ int main(int argc, const char *const *argv)
     };
     unsigned sn = 0;
     for (size_t rem = sz; rem > 0; ) {
-      ssize_t done;
+      ssize_t done = 0;
       while (sn < sizeof(schemes) / sizeof(schemes[0])) {
         done = (*schemes[sn].func)(fileno(stdout), fd, rem);
         if (done >= 0)
